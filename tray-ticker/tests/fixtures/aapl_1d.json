@@ -1,0 +1,23 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "symbol": "AAPL",
+          "regularMarketPrice": 189.84,
+          "previousClose": 188.0,
+          "chartPreviousClose": 188.0
+        },
+        "timestamp": [1700000000, 1700000300, 1700000600],
+        "indicators": {
+          "quote": [
+            {
+              "close": [188.5, 189.2, 189.84]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

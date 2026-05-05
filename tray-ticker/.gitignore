@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+/assets/app.ico
+/assets/default.ico
+/dist

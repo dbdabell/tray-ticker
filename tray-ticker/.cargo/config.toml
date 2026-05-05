@@ -1,0 +1,4 @@
+# Put build output next to this crate. (Some tools set CARGO_TARGET_DIR to a
+# shared cache; scripts/build-release.ps1 still clears that and uses --target-dir.)
+[build]
+target-dir = "target"
