@@ -378,6 +378,10 @@ impl TrayTickerApp {
                 let data = cache.get(&self.selected_range).or(intraday.as_ref()).cloned();
 
                 if let Some(d) = data {
+                    // Snap hover readout to the nearest bar on the series so price is always
+                    // an actual close, not the free Y under the crosshair.
+                    let times = d.times.clone();
+                    let closes = d.closes.clone();
                     Plot::new("price")
                         .height(ui.available_height().max(100.0))
                         .x_axis_formatter(|mark, _| fmt_ts(mark.value as i64))
@@ -386,8 +390,13 @@ impl TrayTickerApp {
                         .label_formatter(|_name, _value| String::new())
                         .coordinates_formatter(
                             Corner::LeftTop,
-                            CoordinatesFormatter::new(|value, _bounds| {
-                                format!("{}\n${:.2}", fmt_ts(value.x as i64), value.y)
+                            CoordinatesFormatter::new(move |value, _bounds| {
+                                match nearest_series_point(&times, &closes, value.x) {
+                                    Some((ts, price)) => {
+                                        format!("{}\n${:.2}", fmt_ts(ts), price)
+                                    }
+                                    None => format!("{}\n${:.2}", fmt_ts(value.x as i64), value.y),
+                                }
                             }),
                         )
                         .show(ui, |plot_ui| {
@@ -453,6 +462,41 @@ fn fmt_ts(ts: i64) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| ts.to_string())
+}
+
+/// Nearest `(timestamp, close)` to plot-x `x` (Unix seconds as f64).
+fn nearest_series_point(times: &[i64], closes: &[f64], x: f64) -> Option<(i64, f64)> {
+    if times.is_empty() || times.len() != closes.len() {
+        return None;
+    }
+    let n = times.len();
+    let idx = times.partition_point(|&t| (t as f64) < x);
+    let i0 = idx.saturating_sub(1);
+    let i1 = idx.min(n - 1);
+    let pick = |i: usize| {
+        let p = closes[i];
+        if p.is_finite() {
+            Some((times[i], p))
+        } else {
+            None
+        }
+    };
+    let a = pick(i0);
+    let b = pick(i1);
+    match (a, b) {
+        (Some((ta, pa)), Some((tb, pb))) => {
+            let da = (ta as f64 - x).abs();
+            let db = (tb as f64 - x).abs();
+            if da <= db {
+                Some((ta, pa))
+            } else {
+                Some((tb, pb))
+            }
+        }
+        (Some(tpa), None) => Some(tpa),
+        (None, Some(tpb)) => Some(tpb),
+        (None, None) => None,
+    }
 }
 
 fn pct_change(price: f64, prev: f64) -> f64 {
