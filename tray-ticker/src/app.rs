@@ -330,6 +330,14 @@ impl TrayTickerApp {
                             egui::Color32::from_rgb(240, 70, 70)
                         };
                         ui.colored_label(col, format!("{:+.2}%", pct));
+                        if let Some(ts) = latest_price_update_ts(d) {
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(format!("Updated {}", fmt_ts(ts)))
+                                    .small()
+                                    .color(egui::Color32::from_gray(150)),
+                            );
+                        }
                     } else {
                         ui.label(match &status {
                             AppStatus::Loading => "loading…",
@@ -452,6 +460,10 @@ fn pct_change(price: f64, prev: f64) -> f64 {
     (price - prev) / prev * 100.0
 }
 
+fn latest_price_update_ts(d: &crate::data::ChartData) -> Option<i64> {
+    d.times.last().copied()
+}
+
 fn build_tooltip(st: &AppState) -> String {
     let name_suffix = |d: &crate::data::ChartData| {
         d.long_name
@@ -459,18 +471,23 @@ fn build_tooltip(st: &AppState) -> String {
             .map(|n| format!("\n{n}"))
             .unwrap_or_default()
     };
+    let updated_suffix = |d: &crate::data::ChartData| {
+        latest_price_update_ts(d)
+            .map(|ts| format!("\nUpdated: {}", fmt_ts(ts)))
+            .unwrap_or_default()
+    };
     match &st.status {
         AppStatus::Loading => "Tray Ticker — loading…".into(),
         AppStatus::Error(e) => format!("Tray Ticker — error: {e}"),
         AppStatus::Stale { last_ok } => st.last_intraday.as_ref().map(|d| {
-            format!("{} ${:.2} ({:+.2}%) stale since {}{}",
+            format!("{} ${:.2} ({:+.2}%) stale since {}{}{}",
                 d.symbol, d.price, pct_change(d.price, d.previous_close),
-                last_ok.format("%H:%M"), name_suffix(d))
+                last_ok.format("%H:%M"), name_suffix(d), updated_suffix(d))
         }).unwrap_or_else(|| "Tray Ticker — stale".into()),
         AppStatus::Ok { .. } => st.last_intraday.as_ref().map(|d| {
-            format!("{} ${:.2} ({:+.2}%){}",
+            format!("{} ${:.2} ({:+.2}%){}{}",
                 d.symbol, d.price, pct_change(d.price, d.previous_close),
-                name_suffix(d))
+                name_suffix(d), updated_suffix(d))
         }).unwrap_or_else(|| "Tray Ticker".into()),
     }
 }
