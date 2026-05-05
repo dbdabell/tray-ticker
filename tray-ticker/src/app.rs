@@ -111,19 +111,33 @@ impl TrayTickerApp {
     // ---- popup lifecycle ----
 
     fn open_popup(&mut self, ctx: &egui::Context) {
-        log::info!("open_popup");
+        log::info!(
+            "open_popup ENTER: was show_popup={} show_ticker_dialog={}",
+            self.show_popup, self.show_ticker_dialog
+        );
         self.show_popup = true;
         self.popup_grace_frames = 4;
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(POPUP_W, POPUP_H)));
+        // Order matters on Windows: make the host window visible before
+        // resizing/positioning. If the host was effectively 1×1 hidden, sending
+        // InnerSize first can be a no-op until visibility is applied.
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(POPUP_W, POPUP_H)));
         self.position_popup(ctx);
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
         self.ensure_range_cached();
         ctx.request_repaint();
+        log::info!("open_popup EXIT: show_popup=true grace={}", self.popup_grace_frames);
     }
 
     fn hide_popup(&mut self, ctx: &egui::Context) {
-        log::info!("hide_popup");
+        // Defensive: never hide the host while the change-ticker dialog is
+        // active — if we shrink to 1×1 here, the dialog has nothing to render
+        // into and the user sees "nothing happened".
+        if self.show_ticker_dialog {
+            log::warn!("hide_popup BLOCKED: show_ticker_dialog is true");
+            return;
+        }
+        log::info!("hide_popup: was show_popup={}", self.show_popup);
         self.show_popup = false;
         // Shrink back to 1×1 but keep the window VISIBLE so eframe keeps calling
         // update() — if we set Visible(false) the repaint timer stops and the
@@ -196,6 +210,13 @@ impl TrayTickerApp {
                     button_state: MouseButtonState::Up,
                     ..
                 } => {
+                    // Keep the popup/dialog stable while the change-ticker dialog is
+                    // active. Some platforms emit extra tray click events around
+                    // context-menu interactions.
+                    if self.show_ticker_dialog {
+                        log::debug!("tray left click ignored while ticker dialog is open");
+                        continue;
+                    }
                     log::info!("tray left click (up) – toggling popup");
                     self.toggle_popup(ctx);
                 }
@@ -216,18 +237,34 @@ impl TrayTickerApp {
     fn drain_menu_queue(&mut self, ctx: &egui::Context) {
         let ids: Vec<String> = {
             let mut q = self.menu_queue.lock().unwrap();
+            if !q.is_empty() {
+                log::info!("drain_menu_queue ENTER: queue has {} id(s)", q.len());
+            }
             q.drain(..).collect()
         };
         for id in ids {
-            log::info!("processing menu id: {id}");
-            if id == self.menu_change_id {
+            let is_change = id == self.menu_change_id || id == MENU_CHANGE;
+            let is_autostart = id == self.menu_autostart_id || id == MENU_AUTOSTART;
+            log::info!(
+                "drain_menu_queue: processing id='{id}' (change_id='{}' autostart_id='{}' is_change={} is_autostart={})",
+                self.menu_change_id, self.menu_autostart_id, is_change, is_autostart
+            );
+            if is_change {
                 self.ticker_buf = self.state.lock().unwrap().symbol.clone();
                 self.ticker_err = None;
                 self.show_ticker_dialog = true;
-                if !self.show_popup {
-                    self.open_popup(ctx);
-                }
-            } else if id == self.menu_autostart_id {
+                log::info!("drain_menu_queue: show_ticker_dialog flipped to TRUE");
+                // Always reopen/refocus from menu action so the dialog is visible.
+                self.open_popup(ctx);
+                // Belt-and-suspenders: ensure another paint occurs so the
+                // dialog renders even if the prior wake-up was coalesced.
+                ctx.request_repaint();
+                log::info!(
+                    "drain_menu_queue: post-open show_popup={} show_ticker_dialog={}",
+                    self.show_popup, self.show_ticker_dialog
+                );
+            } else if is_autostart {
+                log::info!("drain_menu_queue: toggling autostart");
                 if let Ok(exe) = std::env::current_exe() {
                     let on = !autostart::is_enabled();
                     if autostart::set_enabled(on, &exe).is_ok() {
@@ -236,6 +273,8 @@ impl TrayTickerApp {
                         let _ = config::save(&self.config);
                     }
                 }
+            } else {
+                log::warn!("drain_menu_queue: unrecognized menu id='{id}'");
             }
         }
         let _ = ctx;
@@ -253,106 +292,106 @@ impl TrayTickerApp {
     // ---- UI ----
 
     fn ui_main(&mut self, ctx: &egui::Context) {
-        if !self.show_popup {
-            return;
-        }
+        if self.show_popup {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let (err_banner, symbol, status, intraday, cache) = {
+                    let st = self.state.lock().unwrap();
+                    (
+                        st.last_error.clone(),
+                        st.symbol.clone(),
+                        st.status.clone(),
+                        st.last_intraday.clone(),
+                        st.range_cache.clone(),
+                    )
+                };
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let (err_banner, symbol, status, intraday, cache) = {
-                let st = self.state.lock().unwrap();
-                (
-                    st.last_error.clone(),
-                    st.symbol.clone(),
-                    st.status.clone(),
-                    st.last_intraday.clone(),
-                    st.range_cache.clone(),
-                )
-            };
+                if let Some(e) = err_banner {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(200, 140, 0), format!("⚠ {e}"));
+                        if ui.button("Retry").clicked() {
+                            let sym = self.state.lock().unwrap().symbol.clone();
+                            if let Some(p) = &self.poller {
+                                let _ = p.cmd_tx.send(PollerCmd::SetSymbol(sym));
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
 
-            if let Some(e) = err_banner {
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(200, 140, 0), format!("⚠ {e}"));
-                    if ui.button("Retry").clicked() {
+                    ui.heading(&symbol);
+                    ui.separator();
+                    if let Some(d) = &intraday {
+                        ui.label(format!("${:.2}", d.price));
+                        let pct = pct_change(d.price, d.previous_close);
+                        let col = if pct >= 0.0 {
+                            egui::Color32::from_rgb(50, 200, 80)
+                        } else {
+                            egui::Color32::from_rgb(240, 70, 70)
+                        };
+                        ui.colored_label(col, format!("{:+.2}%", pct));
+                    } else {
+                        ui.label(match &status {
+                            AppStatus::Loading => "loading…",
+                            AppStatus::Error(_) => "error",
+                            _ => "—",
+                        });
+                    }
+                    if ui.button("↻").clicked() {
                         let sym = self.state.lock().unwrap().symbol.clone();
                         if let Some(p) = &self.poller {
                             let _ = p.cmd_tx.send(PollerCmd::SetSymbol(sym));
                         }
                     }
                 });
-                ui.separator();
-            }
 
-            ui.horizontal(|ui| {
-                ui.heading(&symbol);
+                if let Some(name) = intraday.as_ref().and_then(|d| d.long_name.clone()) {
+                    ui.label(
+                        egui::RichText::new(name)
+                            .small()
+                            .color(egui::Color32::from_gray(170)),
+                    );
+                }
+
                 ui.separator();
-                if let Some(d) = &intraday {
-                    ui.label(format!("${:.2}", d.price));
-                    let pct = pct_change(d.price, d.previous_close);
-                    let col = if pct >= 0.0 {
-                        egui::Color32::from_rgb(50, 200, 80)
-                    } else {
-                        egui::Color32::from_rgb(240, 70, 70)
-                    };
-                    ui.colored_label(col, format!("{:+.2}%", pct));
+                ui.horizontal(|ui| {
+                    for r in TimeRange::ALL {
+                        let selected = r == self.selected_range;
+                        if ui.selectable_label(selected, r.label()).clicked() {
+                            self.selected_range = r;
+                            self.config.last_range = r.label().into();
+                            let _ = config::save(&self.config);
+                            let sym = self.state.lock().unwrap().symbol.clone();
+                            self.maybe_send_fetch(r, &sym);
+                        }
+                    }
+                });
+
+                let data = cache.get(&self.selected_range).or(intraday.as_ref()).cloned();
+
+                if let Some(d) = data {
+                    Plot::new("price")
+                        .height(ui.available_height().max(100.0))
+                        .x_axis_formatter(|mark, _| fmt_ts(mark.value as i64))
+                        // Default hover text follows the nearest point on the line and clips at
+                        // the plot edge. Show the same info in a fixed corner instead.
+                        .label_formatter(|_name, _value| String::new())
+                        .coordinates_formatter(
+                            Corner::LeftTop,
+                            CoordinatesFormatter::new(|value, _bounds| {
+                                format!("{}\n${:.2}", fmt_ts(value.x as i64), value.y)
+                            }),
+                        )
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(chart::price_line(&d));
+                        });
                 } else {
-                    ui.label(match &status {
-                        AppStatus::Loading => "loading…",
-                        AppStatus::Error(_) => "error",
-                        _ => "—",
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner();
                     });
                 }
-                if ui.button("↻").clicked() {
-                    let sym = self.state.lock().unwrap().symbol.clone();
-                    if let Some(p) = &self.poller {
-                        let _ = p.cmd_tx.send(PollerCmd::SetSymbol(sym));
-                    }
-                }
             });
-
-            if let Some(name) = intraday.as_ref().and_then(|d| d.long_name.clone()) {
-                ui.label(
-                    egui::RichText::new(name)
-                        .small()
-                        .color(egui::Color32::from_gray(170)),
-                );
-            }
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                for r in TimeRange::ALL {
-                    let selected = r == self.selected_range;
-                    if ui.selectable_label(selected, r.label()).clicked() {
-                        self.selected_range = r;
-                        self.config.last_range = r.label().into();
-                        let _ = config::save(&self.config);
-                        let sym = self.state.lock().unwrap().symbol.clone();
-                        self.maybe_send_fetch(r, &sym);
-                    }
-                }
-            });
-
-            let data = cache.get(&self.selected_range).or(intraday.as_ref()).cloned();
-
-            if let Some(d) = data {
-                Plot::new("price")
-                    .height(ui.available_height().max(100.0))
-                    .x_axis_formatter(|mark, _| fmt_ts(mark.value as i64))
-                    // Default hover text follows the nearest point on the line and clips at
-                    // the plot edge. Show the same info in a fixed corner instead.
-                    .label_formatter(|_name, _value| String::new())
-                    .coordinates_formatter(
-                        Corner::LeftTop,
-                        CoordinatesFormatter::new(|value, _bounds| {
-                            format!("{}\n${:.2}", fmt_ts(value.x as i64), value.y)
-                        }),
-                    )
-                    .show(ui, |plot_ui| {
-                        plot_ui.line(chart::price_line(&d));
-                    });
-            } else {
-                ui.centered_and_justified(|ui| { ui.spinner(); });
-            }
-        });
+        }
 
         if self.show_ticker_dialog {
             let mut open = true;

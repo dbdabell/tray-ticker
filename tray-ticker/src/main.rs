@@ -39,20 +39,16 @@ fn main() -> eframe::Result<()> {
         build_tray_menu(&cfg).expect("tray menu");
     let tray = create_tray_icon(menu).expect("tray icon");
 
-    // Shared queue for menu events. We use set_event_handler so events always
-    // arrive even when the egui viewport is tiny/idle. Quit is handled
-    // immediately in the callback; other actions are queued for update().
+    // Shared queue for menu events. We register the global MenuEvent handler
+    // INSIDE the eframe creator below so the closure can capture a clone of
+    // egui's Context — that way we can `request_repaint()` from the callback
+    // and not rely on the 150ms idle repaint timer to drain the queue.
     let menu_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let mq = Arc::clone(&menu_queue);
-    MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
-        let id = ev.id().as_ref().to_string();
-        log::info!("menu event: {id}");
-        if id == quit_id {
-            log::info!("Quit triggered – exiting");
-            std::process::exit(0);
-        }
-        mq.lock().unwrap().push(id);
-    }));
+
+    log::info!(
+        "menu ids: change={} autostart={} quit={}",
+        change_id, autostart_id, quit_id
+    );
 
     // Small (1×1) always-visible host window that keeps the egui event loop
     // alive for tray interaction. The chart popup expands/collapses this.
@@ -67,10 +63,39 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let menu_queue_for_handler = Arc::clone(&menu_queue);
+    let menu_queue_for_app = Arc::clone(&menu_queue);
+    let quit_id_for_handler = quit_id;
+
     eframe::run_native(
         "Tray Ticker",
         native_options,
         Box::new(move |cc| {
+            // Register the menu event handler *now* so we can capture a clone
+            // of the live egui Context. Without this, queued menu events
+            // (e.g. "Change ticker…") only get drained on the next idle
+            // repaint, which can be delayed indefinitely on Windows after the
+            // tray context menu closes.
+            let ctx_for_menu = cc.egui_ctx.clone();
+            let mq = menu_queue_for_handler;
+            let qid = quit_id_for_handler;
+            log::info!("registering MenuEvent::set_event_handler with egui ctx");
+            MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
+                let id = ev.id().as_ref().to_string();
+                log::info!("menu callback fired: id='{id}'");
+                if id == qid {
+                    log::info!("Quit triggered – exiting");
+                    std::process::exit(0);
+                }
+                let qlen = {
+                    let mut q = mq.lock().unwrap();
+                    q.push(id.clone());
+                    q.len()
+                };
+                log::info!("menu callback queued id='{id}' (queue len={qlen}); waking egui");
+                ctx_for_menu.request_repaint();
+            }));
+
             Ok(Box::new(TrayTickerApp::new(
                 cc,
                 singleton,
@@ -79,7 +104,7 @@ fn main() -> eframe::Result<()> {
                 cfg.clone(),
                 tray,
                 check_autostart,
-                menu_queue,
+                menu_queue_for_app,
                 change_id,
                 autostart_id,
             )))
