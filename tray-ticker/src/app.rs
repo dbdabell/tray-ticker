@@ -400,6 +400,9 @@ impl TrayTickerApp {
                             }),
                         )
                         .show(ui, |plot_ui| {
+                            for marker in chart::boundary_vlines(&d, self.selected_range) {
+                                plot_ui.vline(marker);
+                            }
                             plot_ui.line(chart::price_line(&d));
                         });
                 } else {
