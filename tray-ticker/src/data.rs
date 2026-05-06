@@ -36,13 +36,23 @@ impl TimeRange {
         }
     }
 
-    /// Yahoo `range` and `interval` query params.
-    pub fn yahoo_params(self) -> (&'static str, &'static str) {
+    /// Yahoo chart interval for this logical range.
+    pub fn yahoo_interval(self) -> &'static str {
         match self {
-            TimeRange::D1 => ("1d", "5m"),
-            TimeRange::W1 => ("5d", "15m"),
-            TimeRange::M1 => ("1mo", "1h"),
-            TimeRange::Y1 => ("1y", "1d"),
+            TimeRange::D1 => "5m",
+            TimeRange::W1 => "15m",
+            TimeRange::M1 => "1h",
+            TimeRange::Y1 => "1d",
+        }
+    }
+
+    /// Strict trailing-window duration in seconds.
+    pub fn trailing_window_secs(self) -> i64 {
+        match self {
+            TimeRange::D1 => 24 * 60 * 60,
+            TimeRange::W1 => 7 * 24 * 60 * 60,
+            TimeRange::M1 => 30 * 24 * 60 * 60,
+            TimeRange::Y1 => 365 * 24 * 60 * 60,
         }
     }
 }
@@ -104,9 +114,12 @@ struct YahooQuote {
 
 pub fn fetch_chart(symbol: &str, range: TimeRange) -> Result<ChartData> {
     let sym = urlencoding::encode(symbol);
-    let (r, i) = range.yahoo_params();
+    let interval = range.yahoo_interval();
+    let now = chrono::Utc::now().timestamp();
+    let period2 = now.max(1);
+    let period1 = (period2 - range.trailing_window_secs()).max(0);
     let url = format!(
-        "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range={r}&interval={i}"
+        "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?period1={period1}&period2={period2}&interval={interval}"
     );
     let body = ureq::get(&url)
         .set("User-Agent", USER_AGENT)
@@ -243,9 +256,13 @@ mod tests {
 
     #[test]
     fn range_interval_mapping() {
-        assert_eq!(TimeRange::D1.yahoo_params(), ("1d", "5m"));
-        assert_eq!(TimeRange::W1.yahoo_params(), ("5d", "15m"));
-        assert_eq!(TimeRange::M1.yahoo_params(), ("1mo", "1h"));
-        assert_eq!(TimeRange::Y1.yahoo_params(), ("1y", "1d"));
+        assert_eq!(TimeRange::D1.yahoo_interval(), "5m");
+        assert_eq!(TimeRange::W1.yahoo_interval(), "15m");
+        assert_eq!(TimeRange::M1.yahoo_interval(), "1h");
+        assert_eq!(TimeRange::Y1.yahoo_interval(), "1d");
+        assert_eq!(TimeRange::D1.trailing_window_secs(), 24 * 60 * 60);
+        assert_eq!(TimeRange::W1.trailing_window_secs(), 7 * 24 * 60 * 60);
+        assert_eq!(TimeRange::M1.trailing_window_secs(), 30 * 24 * 60 * 60);
+        assert_eq!(TimeRange::Y1.trailing_window_secs(), 365 * 24 * 60 * 60);
     }
 }
